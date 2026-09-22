@@ -94,15 +94,18 @@
       <div class="row"><label>采样方式（像素图选主色/中心）<span class="val" id="vMode">主色</span></label>
         <select id="mode" style="width:100%;background:#2a2f3a;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:5px;">
           <option value="grid" selected>1:1 点阵（GIF 本身就是点阵）</option>
+          <option value="cell">格子中心（屏幕导出的灯珠图）</option>
           <option value="dominant">主色（众数，像素图最准）</option>
           <option value="center">中心取点（锐利）</option>
           <option value="bright">最亮（防糊）</option>
           <option value="average">平均（平滑，照片类）</option>
         </select></div>
-      <div class="row"><label>黑场阈值（&lt;0=黑场抬升，暗部微亮）<span class="val" id="vThr">0（关闭）</span></label>
+      <div class="row"><label>黑场阈值（&lt;0=抬升暗部；正值吸黑但保留暗色灰阶）<span class="val" id="vThr">0（关闭）</span></label>
         <input type="range" id="thr" min="-128" max="255" value="0"></div>
       <div class="row"><label>对比度（-100~100）<span class="val" id="vCon">0</span></label>
         <input type="range" id="contrast" min="-100" max="100" value="0"></div>
+      <div class="row"><label>饱和度（-100~100）<span class="val" id="vSat">0</span></label>
+        <input type="range" id="sat" min="-100" max="100" value="0"></div>
       <div class="row"><label>色阶数（每通道级数，2=纯色）<span class="val" id="vLv">原始</span></label>
         <input type="range" id="levels" min="0" max="64" value="0"></div>
     </div>
@@ -310,6 +313,8 @@ function sampleFrame(canvas){
   const ctx=canvas.getContext("2d",{willReadFrequently:true});
   const img=ctx.getImageData(vx,vy,vw,vh).data;
   const mode=$("mode").value;
+  // cell 模式用整帧数据（绝对坐标，取景框只定原点）
+  const frameData=gif?canvas.getContext("2d",{willReadFrequently:true}).getImageData(0,0,canvas.width,canvas.height).data:null;
   const out=[];
   for(let ry=0;ry<CH;ry++){
     for(let rx=0;rx<CW;rx++){
@@ -325,6 +330,26 @@ function sampleFrame(canvas){
         }
       if(!px.length){ out.push("#000000"); continue; }
       let rgb;
+      if(mode==="cell"){
+        // 格子中心：每颗 LED 对应一格，只取中心 1/2 区域的主色，跳过灯珠间隙/圆边
+        const cx0=vx+Math.floor(rx*vw/CW+vw/CW*0.25), cx1=vx+Math.ceil(rx*vw/CW+vw/CW*0.75);
+        const cy0=vy+Math.floor(ry*vh/CH+vh/CH*0.25), cy1=vy+Math.ceil(ry*vh/CH+vh/CH*0.75);
+        const cnt=new Map();
+        for(let y=Math.max(0,cy0);y<Math.min(gif.height,cy1);y++)
+          for(let x=Math.max(0,cx0);x<Math.min(gif.width,cx1);x++){
+            const fd=frameData[(y*gif.width+x)*4+3]<128;
+            if(fd) continue;
+            const R=frameData[(y*gif.width+x)*4],G=frameData[(y*gif.width+x)*4+1],B=frameData[(y*gif.width+x)*4+2];
+            const k=(R>>3)+","+(G>>3)+","+(B>>3);
+            const e=cnt.get(k);
+            if(e){ e[1]++; } else cnt.set(k,[[R,G,B],1]);
+          }
+        if(!cnt.size){ out.push("#000000"); continue; }
+        let best=null,bn=-1;
+        for(const [p,c] of cnt.values()) if(c>bn){bn=c;best=p;}
+        out.push(quantize(best));
+        continue;
+      }
       if(mode==="grid"){
         // 1:1 点阵：LED (rx,ry) 直接对应传入帧画布的一个像素，不采样不混合；取景框左上角为对齐原点
         const gx=clamp(vx+Math.round((rx+0.5)*vw/CW),0,gif.width-1);
@@ -374,10 +399,20 @@ function quantize(rgb){
     const f=v=>clamp(Math.round(128+(v-128)*k),0,255);
     r=f(r); g=f(g); b=f(b);
   }
+  // 饱和度：围绕亮度做比例缩放，-100=灰度化，+100=双倍饱和
+  const sat=+$("sat").value;
+  if(sat!==0){
+    const k=1+sat/100;
+    const lum=0.299*r+0.587*g+0.114*b;
+    const f=v=>clamp(Math.round(lum+(v-lum)*k),0,255);
+    r=f(r); g=f(g); b=f(b);
+  }
   const thr=+$("thr").value;
   if(thr>0){
-    const lum=0.299*r+0.587*g+0.114*b;
-    if(lum<thr) return "#000000";
+    // 最大通道 + 饱和度保护：近黑噪声吸黑，暗色/灰阶保留
+    const mx=Math.max(r,g,b), spread=mx-Math.min(r,g,b);
+    if(mx<thr*0.4) return "#000000";               // 极暗（任何颜色）→ 纯黑
+    if(mx<thr && spread<48 && mx<thr*0.75) return "#000000"; // 低饱和近黑 → 纯黑；不过半的灰阶保留
   } else if(thr<0){ // 黑场抬升：亮度低于 |thr| 的像素点亮为该亮度，而不是熄灭
     const lum=0.299*r+0.587*g+0.114*b;
     if(lum>0 && lum<-thr){
@@ -454,8 +489,12 @@ $("contrast").oninput=e=>{
   $("vCon").textContent=e.target.value;
   drawCur();
 };
+$("sat").oninput=e=>{
+  $("vSat").textContent=e.target.value;
+  drawCur();
+};
 $("mode").onchange=e=>{
-  const t={grid:"1:1 点阵",dominant:"主色",center:"中心",bright:"最亮",average:"平均"}[e.target.value];
+  const t={grid:"1:1 点阵",cell:"格子中心",dominant:"主色",center:"中心",bright:"最亮",average:"平均"}[e.target.value];
   $("vMode").textContent=t;
   if(e.target.value==="grid" && gif){
     // 吸附：取景框重置为整幅 GIF，保证每个 LED 精确对应一个像素
