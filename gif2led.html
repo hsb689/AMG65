@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AMG65 GIF → LED 点阵转换器</title>
+<style>
+  :root { --bg:#14161a; --panel:#1e2128; --line:#333845; --txt:#d8dce4; --acc:#3f8cff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.5 "Segoe UI",system-ui,sans-serif; }
+  header { padding:10px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  header input[type=file] { display:none; }
+  .btn { background:var(--acc); color:#fff; border:none; border-radius:6px; padding:6px 14px; cursor:pointer; font-size:13px; }
+  .btn.gray { background:#3a4150; }
+  .btn:disabled { opacity:.4; cursor:not-allowed; }
+  main { display:flex; flex-direction:column; gap:14px; padding:16px; max-width:1100px; margin:0 auto; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .sec-gif { width:100%; }
+  .sec-led { width:100%; }
+  .sec-ctrl { width:100%; }
+  .sec-ctrl { display:flex; gap:24px; flex-wrap:wrap; }
+  .sec-ctrl > div.col { flex:1 1 200px; min-width:180px; }
+  .sec-ctrl h2 { width:100%; }
+  .col-full { width:100%; }
+  h2 { font-size:13px; margin:0 0 10px; color:#9aa3b2; font-weight:600; letter-spacing:.05em; }
+  /* 取景器 */
+  #vpWrap { position:relative; width:100%; background:#0a0b0d; border-radius:6px; overflow:hidden; cursor:grab; touch-action:none; }
+  #vpWrap.drag { cursor:grabbing; }
+  #vpWrap canvas { display:block; width:100%; image-rendering:pixelated; }
+  #sel { position:absolute; border:2px solid var(--acc); box-shadow:0 0 0 9999px rgba(0,0,0,.45); pointer-events:none; }
+  #sel::before, #sel::after { content:""; position:absolute; left:50%; top:50%; background:rgba(255,255,255,.55); }
+  #sel::before { width:100%; height:1px; }
+  #sel::after  { height:100%; width:1px; }
+  .vp-info { font-size:12px; color:#8b93a3; margin-top:6px; }
+  /* LED 预览 */
+  #ledCanvas { display:block; background:#050505; border-radius:6px; width:100%; height:auto; image-rendering:pixelated; }
+  .led-side { margin-top:10px; }
+  /* 控制 */
+  .row { margin:10px 0; }
+  .row label { display:block; font-size:12px; color:#9aa3b2; margin-bottom:4px; }
+  .row input[type=range] { width:100%; }
+  .row .val { float:right; color:var(--txt); }
+  #frameInfo { font-size:12px; color:#8b93a3; }
+  .transport { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  #timeline { width:100%; margin-top:8px; }
+  #status { padding:8px 18px; font-size:12px; color:#8b93a3; min-height:18px; }
+  .hint { font-size:12px; color:#767e8d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AMG65 GIF → LED 转换器（63×5）</h1>
+  <button class="btn" id="btnLoad">导入 GIF</button>
+  <input type="file" id="fileInput" accept=".gif,image/gif">
+  <button class="btn" id="btnExport" disabled>导出 LED-XXXXXXXX.json</button>
+</header>
+<main>
+  <section class="sec-gif">
+    <h2>GIF 预览 · 拖动取景框选择映射区域</h2>
+    <div id="vpWrap"><canvas id="gifCanvas"></canvas><div id="sel"></div></div>
+    <div class="vp-info" id="vpInfo">未导入</div>
+  </section>
+
+  <section class="sec-led">
+    <h2>LED 实际显示（63×5）</h2>
+    <canvas id="ledCanvas" width="504" height="40"></canvas>
+    <div class="led-side col">
+      <div class="transport">
+        <button class="btn gray" id="btnPrev" disabled>◀ 上一帧</button>
+        <span id="frameInfo">- / -</span>
+        <button class="btn gray" id="btnNext" disabled>下一帧 ▶</button>
+        <button class="btn gray" id="btnPlay" disabled>播放</button>
+      </div>
+      <input type="range" id="timeline" min="0" max="0" value="0" disabled>
+      <div class="hint">
+        GIF 逐帧解码后按取景框区域平均采样为 63×5；<br>黑色像素保留为 #000000（不点亮）。
+      </div>
+    </div>
+  </section>
+
+  <section class="sec-ctrl">
+    <h2>参数</h2>
+    <div class="col">
+      <div class="row"><label>速度 speed（样本=90）<span class="val" id="vSpeed">90</span></label>
+        <input type="range" id="speed" min="1" max="255" value="90"></div>
+      <div class="row"><label>亮度 brightness（样本=255）<span class="val" id="vBri">255</span></label>
+        <input type="range" id="bri" min="1" max="255" value="255"></div>
+      <div class="row"><label>取景框宽度占比（&gt;100% 黑边补齐）<span class="val" id="vScale">100%</span></label>
+        <input type="range" id="scale" min="30" max="400" value="100"></div>
+    </div>
+    <div class="col">
+      <div class="row"><label>GIF 帧率倍速<span class="val" id="vRate">1.0×</span></label>
+        <input type="range" id="rate" min="10" max="400" value="100"></div>
+      <div class="row"><label>采样方式（像素图选主色/中心）<span class="val" id="vMode">主色</span></label>
+        <select id="mode" style="width:100%;background:#2a2f3a;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:5px;">
+          <option value="grid" selected>1:1 点阵（GIF 本身就是点阵）</option>
+          <option value="dominant">主色（众数，像素图最准）</option>
+          <option value="center">中心取点（锐利）</option>
+          <option value="bright">最亮（防糊）</option>
+          <option value="average">平均（平滑，照片类）</option>
+        </select></div>
+      <div class="row"><label>黑场阈值（&lt;0=黑场抬升，暗部微亮）<span class="val" id="vThr">0（关闭）</span></label>
+        <input type="range" id="thr" min="-128" max="255" value="0"></div>
+      <div class="row"><label>对比度（-100~100）<span class="val" id="vCon">0</span></label>
+        <input type="range" id="contrast" min="-100" max="100" value="0"></div>
+      <div class="row"><label>色阶数（每通道级数，2=纯色）<span class="val" id="vLv">原始</span></label>
+        <input type="range" id="levels" min="0" max="64" value="0"></div>
+    </div>
+  </section>
+</main>
+<div id="status">请先导入 GIF 文件。</div>
+
+<script>
+"use strict";
+const CW=63, CH=5; // LED 网格
+
+/* ---------------- GIF 解码器（LZW，支持逐帧/透明/Disposal） ---------------- */
+function decodeGIF(buf){
+  const d=new DataView(buf); let p=0;
+  const u8=()=>d.getUint8(p++), u16=()=>{const v=d.getUint16(p,true);p+=2;return v;};
+  const sig=String.fromCharCode(u8(),u8(),u8())+String.fromCharCode(u8(),u8(),u8());
+  if(!/^GIF8[79]a$/.test(sig)) throw new Error("不是 GIF 文件");
+  const W=u16(), H=u16(), packed=u8(); u8(); u8();
+  let gct=null;
+  if(packed&0x80){ const n=3*(1<<((packed&7)+1)); gct=new Uint8Array(buf,p,n); p+=n; }
+  let gce={delay:100,trans:-1,disposal:0};
+  const frames=[];
+  while(true){
+    const b=u8();
+    if(b===0x3B) break;                       // trailer
+    if(b===0x21){                             // extension
+      const label=u8();
+      if(label===0xF9){ u8(); const pk=u8(); const delay=u16()*10, trans=u8(); u8(); // 块固定4字节: pk+delay2+trans, 末尾结束符
+        gce={delay, trans:pk&1?trans:-1, disposal:(pk>>2)&7}; }
+      else { while(true){ const s=u8(); if(!s) break; p+=s; } }
+    } else if(b===0x2C){                      // image descriptor
+      const left=u16(), top=u16(), w=u16(), h=u16(), pk=u8();
+      let lct=null;
+      if(pk&0x80){ const n=3*(1<<((pk&7)+1)); lct=new Uint8Array(buf,p,n); p+=n; }
+      const minCode=u8();
+      // 收集 LZW 数据子块
+      let total=0; const chunks=[];
+      while(true){ const s=u8(); if(!s) break; chunks.push(new Uint8Array(buf,p,s)); p+=s; total+=s; }
+      const data=new Uint8Array(total); let o=0;
+      for(const c of chunks){ data.set(c,o); o+=c.length; }
+      const idx=lzwDecode(minCode,data,w*h);
+      if(pk&0x40){ // interlaced：按 8/8 4/8 行序还原
+        const fixed=new Uint8Array(w*h); let src=0;
+        const pass=(start,step)=>{ for(let y=start;y<h;y+=step){ for(let x=0;x<w;x++) fixed[y*w+x]=idx[src++]; } };
+        pass(0,8); pass(4,8); pass(2,4); pass(1,2);
+        frames.push({left,top,w,h,idx:fixed,gct:lct||gcePal(gct),delay:gce.delay||100,trans:gce.trans,disposal:gce.disposal});
+      } else {
+        frames.push({left,top,w,h,idx,gct:lct||gcePal(gct),delay:gce.delay||100,trans:gce.trans,disposal:gce.disposal});
+      }
+      gce={delay:100,trans:-1,disposal:0};
+    } else break;
+  }
+  function gcePal(t){ return t; }
+  return {width:W,height:H,frames};
+}
+function lzwDecode(minCode,data,expect){
+  const clear=1<<minCode, eoi=clear+1;
+  let codeSize=minCode+1, dict=[], out=new Uint8Array(expect), op=0;
+  const resetDict=()=>{ dict=[]; for(let i=0;i<clear;i++) dict.push([i]); dict.push([]); dict.push([]); codeSize=minCode+1; };
+  resetDict();
+  let bitPos=0, prev=null;
+  const bits=()=>{ let v=0; for(let i=0;i<codeSize;i++){ const byte=data[(bitPos>>3)|0]; if(byte===undefined) return eoi; v|=((byte>>(bitPos&7))&1)<<i; bitPos++; } return v; };
+  while(op<expect){
+    const code=bits();
+    if(code===clear){ resetDict(); prev=null; continue; }
+    if(code===eoi) break;
+    let entry;
+    if(code<dict.length && dict[code].length) entry=dict[code];
+    else if(prev) entry=prev.concat([prev[0]]);
+    else break;
+    for(let i=0;i<entry.length && op<expect;i++) out[op++]=entry[i];
+    if(prev && dict.length<4096){ dict.push(prev.concat([entry[0]]));
+      if(dict.length===(1<<codeSize) && codeSize<12) codeSize++; }
+    prev=entry;
+  }
+  return out;
+}
+
+/* ---------------- 状态 ---------------- */
+let gif=null;            // {width,height,frames:[{canvas,delay}]}
+let gifCtx=null;
+let cur=0, playing=false, timer=null, rateMul=1;
+let vw=0, vh=0, vx=0, vy=0;   // 取景框（GIF 像素坐标）
+let lastLED=null;             // 最近一帧的 315 色数组
+
+const $=id=>document.getElementById(id);
+const status=s=>{ $("status").textContent=s; };
+
+/* ---------------- 导入 ---------------- */
+$("btnLoad").onclick=()=>$("fileInput").click();
+$("fileInput").onchange=e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const fr=new FileReader();
+  fr.onload=()=>{
+    try{
+      const raw=decodeGIF(fr.result);
+      compose(raw);
+      status("已解码 "+raw.frames.length+" 帧，尺寸 "+raw.width+"×"+raw.height);
+    }catch(err){ status("解码失败："+err.message); }
+  };
+  fr.readAsArrayBuffer(f);
+};
+
+// 按 disposal 规则合成每帧完整画面
+function compose(raw){
+  const {width:W,height:H,frames}=raw;
+  const cv=$("gifCanvas"); cv.width=W; cv.height=H;
+  gifCtx=cv.getContext("2d",{willReadFrequently:true});
+  const acc=document.createElement("canvas"); acc.width=W; acc.height=H;
+  const actx=acc.getContext("2d",{willReadFrequently:true});
+  const prev=document.createElement("canvas"); prev.width=W; prev.height=H;
+  const pctx=prev.getContext("2d");
+  gif={width:W,height:H,frames:[]};
+  let prevDisposal=0, prevRect=null;
+  for(const f of frames){
+    // 上一帧的 disposal 在画本帧之前生效
+    if(prevDisposal===2 && prevRect) actx.clearRect(prevRect.left,prevRect.top,prevRect.w,prevRect.h);
+    else if(prevDisposal===3){ actx.clearRect(0,0,W,H); actx.drawImage(prev,0,0); }
+    if(f.disposal===3){ pctx.clearRect(0,0,W,H); pctx.drawImage(acc,0,0); } // 画前先存底图
+    const img=actx.createImageData(f.w,f.h);
+    for(let i=0;i<f.w*f.h;i++){
+      const ci=f.idx[i];
+      if(ci===f.trans) continue;
+      img.data[i*4]=f.gct[ci*3]; img.data[i*4+1]=f.gct[ci*3+1]; img.data[i*4+2]=f.gct[ci*3+2]; img.data[i*4+3]=255;
+    }
+    const tmp=document.createElement("canvas"); tmp.width=f.w; tmp.height=f.h;
+    const tctx=tmp.getContext("2d"); tctx.putImageData(img,0,0);
+    actx.drawImage(tmp,f.left,f.top);
+    const snap=document.createElement("canvas"); snap.width=W; snap.height=H;
+    snap.getContext("2d").drawImage(acc,0,0);
+    gif.frames.push({canvas:snap,delay:f.delay});
+    prevDisposal=f.disposal; prevRect=f;
+  }
+  initViewport();
+  cur=0; $("timeline").max=gif.frames.length-1; $("timeline").value=0; $("timeline").disabled=false;
+  ["btnPlay","btnExport","btnPrev","btnNext"].forEach(id=>$(id).disabled=false);
+  drawCur();
+}
+
+/* ---------------- 取景框 ---------------- */
+function initViewport(){
+  const ratio=CW/CH;
+  // 取景框初始：最大 63:5 比例、贴合宽度
+  let w=gif.width, h=Math.round(w/ratio);
+  if(h>gif.height){ h=gif.height; w=Math.round(h*ratio); }
+  applyScale($("scale").value/100);
+  vx=Math.round((gif.width-vw)/2); vy=Math.round((gif.height-vh)/2);
+  $("vpInfo").textContent="GIF "+gif.width+"×"+gif.height+"，共 "+gif.frames.length+" 帧 · 取景框 "+vw+"×"+vh+"（映射 63×5）";
+}
+function applyScale(s){
+  const ratio=CW/CH;
+  let w=Math.round(gif.width*s), h=Math.round(w/ratio);
+  if(h>gif.height*s){ h=Math.round(gif.height*s); w=Math.round(h*ratio); }
+  vw=Math.max(CW,Math.min(w,4*gif.width)); vh=Math.max(CH,Math.min(h,4*gif.height));
+  $("vScale").textContent=Math.round(s*100)+"%";
+}
+function clampX(v){ return clamp(v,Math.min(0,gif.width-vw),Math.max(0,gif.width-vw)); }
+function clampY(v){ return clamp(v,Math.min(0,gif.height-vh),Math.max(0,gif.height-vh)); }
+$("scale").oninput=e=>{
+  if(!gif) return;
+  const cx=vx+vw/2, cy=vy+vh/2;
+  applyScale(e.target.value/100);
+  vx=clampX(Math.round(cx-vw/2));
+  vy=clampY(Math.round(cy-vh/2));
+  drawCur();
+};
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+// 取景框拖动
+(()=>{
+  const wrap=$("vpWrap"); let drag=null;
+  const pos=ev=>{
+    const r=$("gifCanvas").getBoundingClientRect();
+    const cx=(ev.touches?ev.touches[0].clientX:ev.clientX);
+    const cy=(ev.touches?ev.touches[0].clientY:ev.clientY);
+    return {x:(cx-r.left)/r.width*gif.width, y:(cy-r.top)/r.height*gif.height};
+  };
+  const start=ev=>{
+    if(!gif) return;
+    const p=pos(ev);
+    if(p.x<vx||p.x>vx+vw||p.y<vy||p.y>vy+vh){ // 点框外：直接把框中心跳过去
+      vx=clampX(Math.round(p.x-vw/2));
+      vy=clampY(Math.round(p.y-vh/2));
+    }
+    drag={dx:p.x-vx,dy:p.y-vy}; wrap.classList.add("drag"); ev.preventDefault();
+  };
+  const move=ev=>{
+    if(!drag) return;
+    const p=pos(ev);
+    vx=clampX(Math.round(p.x-drag.dx));
+    vy=clampY(Math.round(p.y-drag.dy));
+    drawCur(); ev.preventDefault();
+  };
+  const end=()=>{ drag=null; wrap.classList.remove("drag"); };
+  wrap.addEventListener("mousedown",start);
+  window.addEventListener("mousemove",move);
+  window.addEventListener("mouseup",end);
+  wrap.addEventListener("touchstart",start,{passive:false});
+  wrap.addEventListener("touchmove",move,{passive:false});
+  wrap.addEventListener("touchend",end);
+})();
+
+/* ---------------- 采样：取景框 → 63×5 ---------------- */
+function sampleFrame(canvas){
+  const ctx=canvas.getContext("2d",{willReadFrequently:true});
+  const img=ctx.getImageData(vx,vy,vw,vh).data;
+  const mode=$("mode").value;
+  const out=[];
+  for(let ry=0;ry<CH;ry++){
+    for(let rx=0;rx<CW;rx++){
+      const x0=Math.floor(rx*vw/CW), x1=Math.max(Math.floor((rx+1)*vw/CW),x0+1);
+      const y0=Math.floor(ry*vh/CH), y1=Math.max(Math.floor((ry+1)*vh/CH),y0+1);
+      // 收集格子内不透明像素
+      const px=[];
+      for(let y=y0;y<y1;y++)
+        for(let x=x0;x<x1;x++){
+          const i=(y*vw+x)*4;
+          if(img[i+3]<128) continue;  // 透明当作黑
+          px.push([img[i],img[i+1],img[i+2]]);
+        }
+      if(!px.length){ out.push("#000000"); continue; }
+      let rgb;
+      if(mode==="grid"){
+        // 1:1 点阵：LED (rx,ry) 直接对应传入帧画布的一个像素，不采样不混合；取景框左上角为对齐原点
+        const gx=clamp(vx+Math.round((rx+0.5)*vw/CW),0,gif.width-1);
+        const gy=clamp(vy+Math.round((ry+0.5)*vh/CH),0,gif.height-1);
+        const fd=canvas.getContext("2d").getImageData(gx,gy,1,1).data;
+        out.push(fd[3]<128?"#000000":quantize([fd[0],fd[1],fd[2]]));
+        continue;
+      }
+      if(mode==="average"){
+        // sRGB 感知平均：线性空间求均再回 sRGB，暗部不发灰
+        let r=0,g=0,b=0;
+        for(const [R,G,B] of px){ r+=s2l(R); g+=s2l(G); b+=s2l(B); }
+        const n=px.length;
+        rgb=[l2s(r/n),l2s(g/n),l2s(b/n)];
+      } else if(mode==="center"){
+        rgb=px[(px.length/2)|0];
+      } else if(mode==="bright"){
+        let best=px[0], bl=-1;
+        for(const p of px){ const l=0.299*p[0]+0.587*p[1]+0.114*p[2]; if(l>bl){bl=l;best=p;} }
+        rgb=best;
+      } else { // dominant 众数：像素图/纯色块最准
+        const cnt=new Map();
+        for(const p of px){
+          const k=(p[0]>>3)+","+(p[1]>>3)+","+(p[2]>>3); // 5bit/通道分桶抗噪
+          const e=cnt.get(k);
+          if(e){ e[1]++; } else cnt.set(k,[p,1]);
+        }
+        let best=px[0], bn=-1;
+        for(const [p,c] of cnt.values()) if(c>bn){bn=c;best=p;}
+        rgb=best;
+      }
+      out.push(quantize(rgb));
+    }
+  }
+  return out;
+}
+const s2l=v=>{ v/=255; return v<=0.04045? v/12.92 : Math.pow((v+0.055)/1.055,2.4); };
+const l2s=v=>{ v=Math.max(0,Math.min(1,v)); const r=v<=0.0031308? v*12.92 : 1.055*Math.pow(v,1/2.4)-0.055; return Math.round(r*255); };
+
+/* 量化：黑场阈值 + 对比度 + 色阶压缩，输出 #RRGGBB */
+function quantize(rgb){
+  let [r,g,b]=rgb;
+  // 对比度：围绕中灰 128 拉伸/压缩
+  const con=+$("contrast").value;
+  if(con!==0){
+    const k=Math.tan((con/100+1)*Math.PI/4); // -100→0(全灰), 0→1, +100→∞(硬切)
+    const f=v=>clamp(Math.round(128+(v-128)*k),0,255);
+    r=f(r); g=f(g); b=f(b);
+  }
+  const thr=+$("thr").value;
+  if(thr>0){
+    const lum=0.299*r+0.587*g+0.114*b;
+    if(lum<thr) return "#000000";
+  } else if(thr<0){ // 黑场抬升：亮度低于 |thr| 的像素点亮为该亮度，而不是熄灭
+    const lum=0.299*r+0.587*g+0.114*b;
+    if(lum>0 && lum<-thr){
+      const k=(-thr)/lum;
+      r=Math.min(255,Math.round(r*k)); g=Math.min(255,Math.round(g*k)); b=Math.min(255,Math.round(b*k));
+    }
+  }
+  const lv=+$("levels").value;
+  if(lv>=2){
+    const q=v=>Math.round(Math.round(v/(255/(lv-1)))*(255/(lv-1)));
+    r=q(r); g=q(g); b=q(b);
+  }
+  return "#"+[r,g,b].map(v=>v.toString(16).padStart(2,"0").toUpperCase()).join("");
+}
+
+/* ---------------- 渲染 ---------------- */
+function drawCur(){
+  if(!gif||!gif.frames.length) return;
+  const f=gif.frames[cur];
+  // 重绘 GIF 当前帧到主画布
+  const cv=$("gifCanvas"); const c=cv.getContext("2d");
+  c.clearRect(0,0,cv.width,cv.height); c.drawImage(f.canvas,0,0);
+  drawSel();
+  lastLED=sampleFrame(f.canvas);
+  drawLED(lastLED);
+  $("frameInfo").textContent=(cur+1)+" / "+gif.frames.length;
+  $("timeline").value=cur;
+}
+function drawSel(){
+  const cv=$("gifCanvas"), r=cv.getBoundingClientRect(), wrap=$("vpWrap");
+  const sx=r.width/gif.width, sy=r.height/gif.height;
+  const s=$("sel");
+  s.style.left=(vx*sx)+"px"; s.style.top=(vy*sy)+"px";
+  s.style.width=(vw*sx)+"px"; s.style.height=(vh*sy)+"px";
+}
+function drawLED(cols){
+  const cv=$("ledCanvas"), ctx=cv.getContext("2d");
+  const cell=8, pad=2;
+  cv.width=CW*cell; cv.height=CH*cell;
+  ctx.fillStyle="#050505"; ctx.fillRect(0,0,cv.width,cv.height);
+  cols.forEach((hex,i)=>{
+    const x=i%CW, y=(i/CW)|0;
+    ctx.beginPath();
+    ctx.arc(x*cell+cell/2, y*cell+cell/2, cell/2-pad, 0, 7);
+    ctx.fillStyle=hex==="#000000"?"#101010":hex;
+    ctx.fill();
+  });
+}
+
+/* ---------------- 播放 ---------------- */
+$("btnPlay").onclick=()=>{ playing?stop():play(); };
+function play(){
+  if(!gif) return; playing=true; $("btnPlay").textContent="暂停";
+  const step=()=>{
+    if(!playing) return;
+    const d=Math.max(20, gif.frames[cur].delay/rateMul);
+    timer=setTimeout(()=>{ cur=(cur+1)%gif.frames.length; drawCur(); step(); }, d);
+  };
+  step();
+}
+function stop(){ playing=false; clearTimeout(timer); $("btnPlay").textContent="播放"; }
+$("rate").oninput=e=>{ rateMul=e.target.value/100; $("vRate").textContent=rateMul.toFixed(1)+"×"; };
+$("timeline").oninput=e=>{ stop(); cur=+e.target.value; drawCur(); };
+$("btnPrev").onclick=()=>{ stop(); cur=(cur-1+gif.frames.length)%gif.frames.length; drawCur(); };
+$("btnNext").onclick=()=>{ stop(); cur=(cur+1)%gif.frames.length; drawCur(); };
+$("speed").oninput=e=>$("vSpeed").textContent=e.target.value;
+$("bri").oninput=e=>$("vBri").textContent=e.target.value;
+$("thr").oninput=e=>{
+  const v=+e.target.value;
+  $("vThr").textContent=v===0?"0（关闭）":(v>0?v+"（压黑）":v+"（抬升）");
+  drawCur();
+};
+$("contrast").oninput=e=>{
+  $("vCon").textContent=e.target.value;
+  drawCur();
+};
+$("mode").onchange=e=>{
+  const t={grid:"1:1 点阵",dominant:"主色",center:"中心",bright:"最亮",average:"平均"}[e.target.value];
+  $("vMode").textContent=t;
+  if(e.target.value==="grid" && gif){
+    // 吸附：取景框重置为整幅 GIF，保证每个 LED 精确对应一个像素
+    $("scale").value=100;
+    applyScale(1);
+    vx=0; vy=0;
+  }
+  drawCur();
+};
+$("levels").oninput=e=>{
+  const v=+e.target.value;
+  $("vLv").textContent=v<2?"原始":v+" 级（步长 "+Math.round(255/(v-1))+"）";
+  drawCur();
+};
+
+/* ---------------- 导出 ---------------- */
+$("btnExport").onclick=()=>{
+  if(!gif) return;
+  const cols=[];
+  for(let i=0;i<gif.frames.length;i++){
+    const f=gif.frames[i];
+    // 临时切取景采样（不改当前显示帧）
+    const c=sampleFrame(f.canvas);
+    cols.push(c);
+  }
+  const eff={ brightness:+$("bri").value, speed:+$("speed").value,
+    frames:cols.map((c,i)=>({frameIndex:i, frameRGB:c})) };
+  const json={ "MACHENIKE":"68 LED", "led effects":[eff] };
+  const blob=new Blob([JSON.stringify(json,null,"\t")],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="LED-"+String(Date.now()).slice(-8)+".json";
+  a.click(); URL.revokeObjectURL(a.href);
+  status("已导出 "+gif.frames.length+" 帧 × 315 色。");
+};
+
+/* 导出用采样不能依赖当前取景绘制帧——sampleFrame 内部用 vx/vy，OK */
+</script>
+</body>
+</html>
